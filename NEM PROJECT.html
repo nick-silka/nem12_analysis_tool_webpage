@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>NEM12 Graphs with Date Filter</title>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+
+  <aside class="ad-column">
+    <div class="ad-box">Ad Space</div>
+  </aside>
+
+
+  <main class="page">
+    <h1>NEM12 Data Visualization (kWh)</h1>
+
+    <div id="distributor-block">
+      <p id="distributor-info"><strong>Distributor:</strong> (not loaded)</p>
+
+      <div id="tariff-block">
+        <label for="class-select"><strong>Classification:</strong></label>
+        <select id="class-select">
+          <option value="RESI" selected>RESI</option>
+          <option value="BUSI">BUSI</option>
+        </select>
+
+        <div style="margin-top:10px;">
+          <span><strong>Suggested Tariff:</strong> </span>
+          <span id="tariff-output">In progress</span>
+        </div>
+
+        <div id="tariff-justification"><strong>Justification:</strong> In progress</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <input type="file" id="file-input" accept=".csv" />
+
+      <div class="radio-input" id="view-toggle">
+        <label for="view-half">
+          <input id="view-half" type="radio" name="view" value="half">
+          <span>Half-hourly</span>
+        </label>
+
+        <label for="view-daily">
+          <input id="view-daily" type="radio" name="view" value="daily" checked>
+          <span>Overall</span>
+        </label>
+
+        <span class="selection"></span>
+      </div>
+
+      <label>
+        Date:
+        <select id="date-select">
+          <option value="All">All</option>
+        </select>
+      </label>
+
+      <button id="export-btn" class="button">Export Excel Report</button>
+    </div>
+
+    <div id="chart"><p>Select a CSV to begin...</p></div>
+
+    <div id="common-periods">
+      <h2>Top Usage Periods (kWh)</h2>
+      <div id="period-table"></div>
+    </div>
+
+    <footer class="site-footer">2026 © - easyenergydata.com</footer>
+  </main>
+
+  <aside class="ad-column">
+    <div class="ad-box">Ad Space</div>
+  </aside>
+
+  <script>
+    let rawData = [], dailyData = [], lastPeriodsTable = [];
+    let distributorPrefix2 = "";
+    let distributorName = "";
+
+    const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+    function ordinal(n) {
+      const s = ["th","st","nd","rd"], v = n % 100;
+      return n + (s[(v-20)%10] || s[v] || s[0]);
+    }
+
+    function formatDisplayDate(ymd) {
+      const year = +ymd.slice(0,4);
+      const month = +ymd.slice(4,6) - 1;
+      const day = +ymd.slice(6,8);
+      return `${ordinal(day)} ${monthNames[month]} ${year}`;
+    }
+
+    function distributorFromNmiPrefix(prefix2Raw) {
+      const p = (prefix2Raw || "").trim().toUpperCase();
+      const exactMap = {
+        "60": "Jemena",
+        "61": "Citipower",
+        "62": "Powercor",
+        "63": "AusNet",
+        "64": "United Energy",
+
+        "20": "SAPN",
+
+        "40": "Essential Energy",
+        "41": "Ausgrid",
+        "42": "Essential Energy",
+        "43": "Endeavor Energy",
+        "44": "Essential Energy",
+        "45": "Essential Energy",
+
+        "QB": "Energex",
+        "31": "Energex"
+      };
+      return exactMap[p] || "";
+    }
+
+    function setDistributorFromCsvLines(lines) {
+      const el = document.getElementById("distributor-info");
+      if (!el) return;
+
+      const line200 = lines.find(l => l && l.trim().startsWith("200,"));
+      if (!line200) {
+        distributorPrefix2 = "";
+        distributorName = "";
+        el.innerHTML = "<strong>Distributor:</strong> ERROR (missing 200 record)";
+        return;
+      }
+
+      const fields = line200.split(",");
+      const nmi = (fields[1] || "").trim();
+      distributorPrefix2 = nmi.slice(0, 2).toUpperCase();
+
+      distributorName = distributorFromNmiPrefix(distributorPrefix2);
+
+      el.innerHTML = distributorName
+        ? `<strong>Distributor:</strong> ${distributorName}`
+        : `<strong>Distributor:</strong> ERROR (unknown prefix "${distributorPrefix2}")`;
+    }
+
+    function syncViewToggle() {
+      const wrap = document.getElementById("view-toggle");
+      if (!wrap) return;
+      const val = document.querySelector('input[name="view"]:checked')?.value;
+      wrap.classList.toggle("is-left", val === "half");
+      wrap.classList.toggle("is-right", val === "daily");
+    }
+
+    document.getElementById("view-toggle").addEventListener("change", () => {
+      syncViewToggle();
+      drawChart();
+    });
+    document.getElementById("date-select").addEventListener("change", drawChart);
+
+    document.getElementById("file-input").addEventListener("change", function(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const text = (e.target.result || "").trim();
+        const lines = text.split(/\r?\n/);
+
+        setDistributorFromCsvLines(lines);
+
+        rawData = [];
+        lines.forEach(line => {
+          const f = line.split(",");
+          if (f[0] === "300") {
+            const ymd = f[1];
+            const year = +ymd.slice(0,4), month = +ymd.slice(4,6) - 1, day = +ymd.slice(6,8);
+
+            for (let i = 2; i < f.length; i++) {
+              const val = parseFloat(f[i]);
+              const idx = i - 2;
+              const hr = Math.floor(idx / 2);
+              const mn = (idx % 2) * 30;
+              const date = new Date(year, month, day, hr, mn);
+              rawData.push({ date, value: val, ymd, periodIdx: idx });
+            }
+          }
+        });
+
+        const dailyMap = d3.rollup(rawData, v => d3.sum(v, d => d.value), d => d.ymd);
+        dailyData = Array.from(dailyMap, ([ymd, sum]) => {
+          const year = +ymd.slice(0,4), month = +ymd.slice(4,6) - 1, day = +ymd.slice(6,8);
+          return { date: new Date(year, month, day), value: sum, ymd };
+        }).sort((a, b) => a.date - b.date);
+
+        const dates = Array.from(new Set(rawData.map(d => d.ymd))).sort();
+        const sel = d3.select("#date-select");
+        sel.selectAll("option").remove();
+        sel.append("option").attr("value", "All").text("All");
+        dates.forEach(d => sel.append("option").attr("value", d).text(formatDisplayDate(d)));
+
+        syncViewToggle();
+        drawChart();
+      };
+
+      reader.readAsText(file);
+    });
+
+    function drawChart() {
+      if (!rawData.length) return;
+
+      const view = document.querySelector('input[name="view"]:checked').value;
+      const selected = document.getElementById("date-select").value;
+
+      const data = view === "daily"
+        ? dailyData
+        : rawData.filter(d => selected === "All" || d.ymd === selected);
+
+      if (!data.length) {
+        d3.select("#chart").html("<p>No data for selection.</p>");
+        d3.select("#period-table").html("");
+        return;
+      }
+
+      const periods = d3.rollups(
+        rawData,
+        v => {
+          const byDate = d3.rollup(v, vv => d3.mean(vv, d => d.value), d => d.ymd);
+          const maxDate = Array.from(byDate.entries()).sort((a, b) => b[1] - a[1])[0];
+          return { maxAvg: maxDate ? maxDate[1] : 0, ymd: maxDate ? maxDate[0] : "" };
+        },
+        d => d.periodIdx
+      ).map(([idx, { maxAvg, ymd }]) => ({ idx, maxAvg, ymd }));
+
+      const sortedPeriods = periods.sort((a, b) => b.maxAvg - a.maxAvg).slice(0, 10);
+
+      const tableHtml = [
+        `<table><tr><th>Period</th><th>Date</th><th>Start</th><th>End</th><th>Average (kWh)</th></tr>`
+      ];
+      lastPeriodsTable = [["Period","Date","Start","End","Average (kWh)"]];
+
+      sortedPeriods.forEach(p => {
+        const hr = Math.floor(p.idx / 2);
+        const mn = (p.idx % 2) * 30;
+        const start = String(hr).padStart(2, "0") + ":" + String(mn).padStart(2, "0");
+
+        const endMn = (mn + 30) % 60;
+        const endHr = hr + (mn + 30 >= 60 ? 1 : 0);
+        const end = String(endHr).padStart(2, "0") + ":" + String(endMn).padStart(2, "0");
+
+        const dispDate = p.ymd ? formatDisplayDate(p.ymd) : "";
+
+        tableHtml.push(
+          `<tr><td>${p.idx + 1}</td><td>${dispDate}</td><td>${start}</td><td>${end}</td><td>${p.maxAvg.toFixed(3)}</td></tr>`
+        );
+        lastPeriodsTable.push([p.idx + 1, dispDate, start, end, p.maxAvg.toFixed(3)]);
+      });
+
+      tableHtml.push(`</table>`);
+      d3.select("#period-table").html(tableHtml.join(""));
+
+      const width = Math.max(800, data.length * 10);
+      const height = 400;
+      const m = { top: 20, right: 30, bottom: 40, left: 60 };
+
+      d3.select("#chart").selectAll("*").remove();
+
+      const scroll = d3.select("#chart")
+        .append("div")
+        .attr("class", "scroll-container")
+        .style("width", "900px")
+        .style("overflow-x", "auto");
+
+      const svg = scroll.append("svg")
+        .attr("width", width)
+        .attr("height", height);
+
+      const x = d3.scaleTime()
+        .domain(d3.extent(data, d => d.date))
+        .range([m.left, width - m.right]);
+
+      const y = d3.scaleLinear()
+        .domain(d3.extent(data, d => d.value))
+        .nice()
+        .range([height - m.bottom, m.top]);
+
+      svg.append("g")
+        .attr("transform", `translate(0,${height - m.bottom})`)
+        .call(d3.axisBottom(x));
+
+      svg.append("g")
+        .attr("transform", `translate(${m.left},0)`)
+        .call(d3.axisLeft(y));
+
+      const line = d3.line()
+        .defined(d => !isNaN(d.value))
+        .x(d => x(d.date))
+        .y(d => y(d.value));
+
+      svg.append("path")
+        .datum(data)
+        .attr("fill", "none")
+        .attr("stroke", "#000")
+        .attr("stroke-width", 1.5)
+        .attr("d", line);
+
+      svg.append("text")
+        .attr("x", width / 2)
+        .attr("y", height - 5)
+        .attr("text-anchor", "middle")
+        .text(view === "daily" ? "Date" : "Date / Time");
+
+      svg.append("text")
+        .attr("transform", "rotate(-90)")
+        .attr("x", -height / 2)
+        .attr("y", 15)
+        .attr("text-anchor", "middle")
+        .text(view === "daily" ? "Total Energy (kWh)" : "Half-hourly Energy (kWh)");
+    }
+
+    document.getElementById("export-btn").onclick = function() {
+      const svg = document.querySelector(".scroll-container svg");
+      if (!svg) { alert("No graph to export."); return; }
+
+      const serializer = new XMLSerializer();
+      const svgStr = serializer.serializeToString(svg);
+
+      const canvas = document.createElement("canvas");
+      const width = +svg.getAttribute("width");
+      const height = +svg.getAttribute("height");
+      canvas.width = width;
+      canvas.height = height;
+
+      const ctx = canvas.getContext("2d");
+      const img = new window.Image();
+      const svg64 = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgStr)));
+
+      img.onload = function() {
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0);
+
+        const pngData = canvas.toDataURL("image/png");
+
+        const wb = XLSX.utils.book_new();
+
+        const ws = XLSX.utils.aoa_to_sheet(lastPeriodsTable);
+        XLSX.utils.book_append_sheet(wb, ws, "Top Usage Periods");
+
+        const imgSheet = XLSX.utils.aoa_to_sheet([
+          ["Graph Snapshot"],
+          ["(Click link to open PNG graph in browser):"],
+          ["Graph PNG", { l: { Target: pngData, Tooltip: "Graph PNG" } }]
+        ]);
+        XLSX.utils.book_append_sheet(wb, imgSheet, "Graph Snapshot");
+
+        XLSX.writeFile(wb, "NEM12_Report.xlsx");
+      };
+
+      img.src = svg64;
+    };
+
+    syncViewToggle();
+  </script>
+</body>
+</html>
