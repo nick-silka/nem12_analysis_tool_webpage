@@ -1,0 +1,4 @@
+=======================================================================================================
+HTML & STYLE FILE FOR BASIC NEM12 DATA ANALYSIS VIA WEB BROWSER
+SIMPLY OPEN HTML FILE WITH STYLE.CSS SHEET IN THE SAME FOLDER ON INTERNET BROWSER AND UPLOAD NEM12.CSV FILE FROM YOUR RETAILER.
+=======================================================================================================
